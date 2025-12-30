@@ -2,7 +2,7 @@
 
 # Server endpoints
 server:
-  pc_ip: "192.168.1.150"
+  pc_ip: "IP"
   stt_port: 8010
   tts_port: 8000
 
@@ -10,8 +10,8 @@ server:
 audio:
   sample_rate: 16000
   chunk_ms: 20  # 20ms recommended for low latency
-  input_device: "CABLE Output"  
-  output_device: "VoiceMeeter Out B1"   
+  input_device: ""  
+  output_device: null 
 
 # Voice Activity Detection (VAD)
 vad:

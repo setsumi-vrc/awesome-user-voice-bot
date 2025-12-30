@@ -37,3 +37,5 @@ Thumbs.db
 voices/
 *.onnx
 *.onnx.json
+
+.github/
