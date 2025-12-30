@@ -1,0 +1,2 @@
+(venv) main@main-ThinkPad-L14-Gen-1:~/client-bot$ pactl load-module module-null-sink sink_name=bot_sink sink_properties=device.description=BotSink
+(venv) main@main-ThinkPad-L14-Gen-1:~/client-bot$ pactl load-module module-null-sink sink_name=game_sink sink_properties=device.description=GameSink

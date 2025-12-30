@@ -1,0 +1,14 @@
+.\venv\Scripts\Activate.ps1
+ uvicorn tts_server:app --host 0.0.0.0 --port 8000
+ uvicorn stt_server:app --host 0.0.0.0 --port 8010
+
+ python -m piper.download_voices en_US-libritts-high
+
+
+ available_voices = _list_available_voices()
+    if voice not in available_voices:
+        logger.warning(f"Voice not found: {voice}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Voice '{voice}' not found. Available: {available_voices}"
+        ) 

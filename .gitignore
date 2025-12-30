@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtual env
+venv/
+.env
+
+# Models / voices
+voices/
+*.onnx
+*.onnx.json
+
+# Audio temp
+*.wav
+*.mp3
+
+# Config sensible
+config.yaml
+system_prompt.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# CUDA / binaries
+*.dll
+
+# Models / voices
+voices/
+*.onnx
+*.onnx.json

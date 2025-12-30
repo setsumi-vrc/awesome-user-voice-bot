@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TTS Server - Voice AI Control Panel</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>🎙️ TTS Server Control Panel</h1>
+            <div class="status-bar">
+                <div class="status-item">
+                    <span class="status-label">TTS:</span>
+                    <span class="status-indicator" id="tts-status">⚫</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">STT:</span>
+                    <span class="status-indicator" id="stt-status">⚫</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Ollama:</span>
+                    <span class="status-indicator" id="ollama-status">⚫</span>
+                </div>
+            </div>
+        </header>
+
+        <main>
+            <!-- AI Conversation Section -->
+            <section class="card">
+                <h2>🤖 AI Conversation</h2>
+
+                <!-- Personality Selector -->
+                <div class="form-group">
+                    <label for="personality-select">Bot Personality:</label>
+                    <div class="personality-controls">
+                        <select id="personality-select" class="input" style="flex: 1;">
+                            <option value="">Loading personalities...</option>
+                        </select>
+                        <button id="edit-personality-btn" class="btn btn-secondary" title="Edit personality">
+                            ✏️
+                        </button>
+                        <button id="new-personality-btn" class="btn btn-secondary" title="Create new personality">
+                            ➕
+                        </button>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="model-select">AI Model:</label>
+                    <select id="model-select" class="input">
+                        <option value="">Loading models...</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="voice-select">Voice Model:</label>
+                    <select id="voice-select" class="input">
+                        <option value="">Loading voices...</option>
+                    </select>
+                </div>
+
+                <!-- Advanced Voice Controls -->
+                <details class="advanced-controls">
+                    <summary>⚙️ Advanced Voice Settings</summary>
+                    <div class="advanced-grid">
+                        <div class="form-group">
+                            <label for="speaker-id">Speaker ID: <span id="speaker-id-val">12</span></label>
+                            <input type="range" id="speaker-id" class="slider" min="0" max="50" value="12">
+                            <small>For multi-speaker models</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="length-scale">Speed: <span id="length-scale-val">1.00</span>x</label>
+                            <input type="range" id="length-scale" class="slider" min="0.5" max="2.0" step="0.1"
+                                value="1.0">
+                            <small>1.0 = normal, &lt;1 = faster, &gt;1 = slower</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="noise-scale">Variance: <span id="noise-scale-val">0.67</span></label>
+                            <input type="range" id="noise-scale" class="slider" min="0" max="1" step="0.01"
+                                value="0.667">
+                            <small>Voice expressiveness</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="noise-w">Stability: <span id="noise-w-val">0.80</span></label>
+                            <input type="range" id="noise-w" class="slider" min="0" max="1" step="0.01" value="0.8">
+                            <small>Voice consistency</small>
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin-top: 1rem;">
+                        <button id="reset-advanced-btn" class="btn btn-secondary" style="width: 100%;">
+                            🔄 Reset to Defaults
+                        </button>
+                    </div>
+                </details>
+
+                <!-- Save Configuration Button -->
+                <div class="form-group" style="margin-top: 1rem;">
+                    <button id="save-config-btn" class="btn btn-primary" style="width: 100%;">
+                        💾 Apply Configuration
+                    </button>
+                    <small style="color: #999;">Updates server settings for all clients (VRChat, OSC, etc.)</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="text-input">Test Message:</label>
+                    <textarea id="text-input" class="input textarea"
+                        placeholder="Type a test message to verify your configuration..."
+                        rows="3">Hello! How are you?</textarea>
+                </div>
+                <button id="generate-btn" class="btn btn-primary">
+                    🧪 Test Configuration
+                </button>
+                <div id="audio-player" style="display: none; margin-top: 1rem;">
+                    <audio id="audio" controls style="width: 100%;"></audio>
+                </div>
+                <div id="error-message" class="error-message" style="display: none;"></div>
+                <div id="loading" class="loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <span>Generating audio...</span>
+                </div>
+            </section>
+
+            <!-- Chat Log Section -->
+            <section class="card">
+                <h2>💭 Conversation Log</h2>
+                <div class="chat-controls">
+                    <button id="clear-log-btn" class="btn btn-secondary">🗑️ Clear Log</button>
+                    <span class="chat-count">Messages: <strong id="message-count">0</strong></span>
+                </div>
+                <div id="chat-log" class="chat-log">
+                    <div class="chat-empty">No conversations yet. Generate speech to see the log.</div>
+                </div>
+            </section>
+
+            <!-- Metrics Section -->
+            <section class="card">
+                <h2>📊 Performance Metrics</h2>
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">TTS Requests</div>
+                        <div class="metric-value" id="metric-tts-requests">-</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">STT Transcriptions</div>
+                        <div class="metric-value" id="metric-stt-requests">-</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">LLM Success Rate</div>
+                        <div class="metric-value" id="metric-llm-success">-</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Avg Response Time</div>
+                        <div class="metric-value" id="metric-avg-time">-</div>
+                    </div>
+                </div>
+                <button id="refresh-metrics-btn" class="btn btn-secondary">
+                    🔄 Refresh Metrics
+                </button>
+            </section>
+
+            <!-- Configuration Section -->
+            <section class="card">
+                <h2>⚙️ Configuration</h2>
+                <div class="config-grid">
+                    <div class="config-item">
+                        <strong>TTS Server:</strong>
+                        <span id="config-tts-url">Loading...</span>
+                    </div>
+                    <div class="config-item">
+                        <strong>STT Server:</strong>
+                        <span id="config-stt-url">Loading...</span>
+                    </div>
+                    <div class="config-item">
+                        <strong>Circuit Breaker:</strong>
+                        <span id="config-circuit-breaker">Loading...</span>
+                    </div>
+                    <div class="config-item">
+                        <strong>Available Voices:</strong>
+                        <span id="config-voices-count">-</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- API Documentation -->
+            <section class="card">
+                <h2>📚 API Endpoints</h2>
+                <div class="api-docs">
+                    <div class="api-endpoint">
+                        <span class="api-method">GET</span>
+                        <code>/health</code>
+                        <span class="api-desc">Health check</span>
+                    </div>
+                    <div class="api-endpoint">
+                        <span class="api-method">GET</span>
+                        <code>/metrics</code>
+                        <span class="api-desc">Prometheus metrics</span>
+                    </div>
+                    <div class="api-endpoint">
+                        <span class="api-method">GET</span>
+                        <code>/voices</code>
+                        <span class="api-desc">List available voice models</span>
+                    </div>
+                    <div class="api-endpoint">
+                        <span class="api-method">POST</span>
+                        <code>/tts</code>
+                        <span class="api-desc">Generate speech from text</span>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>TTS Server v1.0 | Built with FastAPI + Vanilla JS |
+                <a href="https://github.com" target="_blank">GitHub</a>
+            </p>
+        </footer>
+    </div>
+
+    <!-- Personality Editor Modal -->
+    <div id="personality-modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modal-title">Edit Personality</h2>
+                <button class="modal-close" id="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="personality-name">Personality Name:</label>
+                    <input type="text" id="personality-name" class="input" placeholder="e.g., my-custom-bot">
+                </div>
+                <div class="form-group">
+                    <label for="personality-content">System Prompt:</label>
+                    <textarea id="personality-content" class="input textarea" rows="10"
+                        placeholder="Enter the system prompt that defines the bot's personality..."></textarea>
+                </div>
+                <div class="modal-footer">
+                    <button id="save-personality-btn" class="btn btn-primary">💾 Save Personality</button>
+                    <button id="cancel-personality-btn" class="btn btn-secondary">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+
+</html>

@@ -1,0 +1,388 @@
+#!/usr/bin/env python3
+"""
+VRChat Talkback Bot - Real-time voice interaction client.
+
+Captures game audio, transcribes via STT WebSocket, and responds with TTS.
+"""
+import asyncio
+import logging
+import sys
+from contextlib import suppress
+from pathlib import Path
+
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError
+
+from audio import PipeWireRecorder
+from config_loader import load_config
+from metrics import Metrics, metrics_logger
+from tts_client import TTSClient
+from websocket_handler import WebSocketHandler
+
+logger = logging.getLogger(__name__)
+
+
+
+class TalkbackClient:
+    """Main talkback bot client."""
+    
+    def __init__(self, config_path: Path = None):
+        """Initialize client with configuration.
+        
+        Args:
+            config_path: Optional path to config.yaml.
+        """
+        self.config = load_config(config_path)
+        self._setup_logging()
+        
+        self.metrics = Metrics()
+        self.tts_client = TTSClient(
+            self.config.server.tts_url,
+            self.config.tts
+        )
+        self.recorder = PipeWireRecorder(
+            self.config.audio,
+            self.config.pipewire
+        )
+
+SAMPLE_RATE = int(os.environ.get("SAMPLE_RATE", "16000"))
+
+# 20ms/40ms recomendado; default 20ms
+CHUNK_MS = int(os.environ.get("CHUNK_MS", "20"))
+FRAMES = int(SAMPLE_RATE * CHUNK_MS / 1000)
+BYTES_PER_CHUNK = FRAMES * 2  # PCM16 mono => 2 bytes por sample
+
+INPUT_PW_TARGET = os.environ.get("INPUT_PW_TARGET", "game_sink.monitor")
+OUTPUT_SINK_TARGET = os.environ.get("OUTPUT_SINK_TARGET", "bot_sink")
+
+# VAD-ish por RMS
+SILENCE_RMS_THRESHOLD = float(os.environ.get("SILENCE_RMS_THRESHOLD", "0.008"))
+SILENCE_MAX_SECONDS = float(os.environ.get("SILENCE_MAX_SECONDS", "0.7"))
+MIN_UTTERANCE_SECONDS = float(os.environ.get("MIN_UTTERANCE_SECONDS", "0.35"))
+
+# Cooldown entre utterances (evita retriggers)
+COOLDOWN_SECONDS = float(os.environ.get("COOLDOWN_SECONDS", "1.2"))
+
+# Tail de silencio en frames (para “cerrar” la utterance del server)
+SILENCE_TAIL_FRAMES = int(os.environ.get("SILENCE_TAIL_FRAMES", "6"))  # 6 * CHUNK_MS ms
+
+# Cola (backpressure)
+QUEUE_MAX = int(os.environ.get("QUEUE_MAX", "200"))
+
+# WebSocket keepalive
+PING_INTERVAL = float(os.environ.get("PING_INTERVAL", "20"))
+PING_TIMEOUT = float(os.environ.get("PING_TIMEOUT", "20"))
+RECONNECT_DELAY = float(os.environ.get("RECONNECT_DELAY", "1.0"))
+
+# Cooldown de respuesta (evita que el bot hable encima todo el tiempo)
+RESPONSE_COOLDOWN_SECONDS = float(os.environ.get("RESPONSE_COOLDOWN_SECONDS", "0.8"))
+
+# Seguridad extra: si se queda sin audio, no te quedes colgado en q.get
+Q_GET_TIMEOUT = float(os.environ.get("Q_GET_TIMEOUT", "1.0"))
+
+# =========================
+# Audio helpers
+# =========================
+
+def pcm16le_rms(pcm_bytes: bytes) -> float:
+    if not pcm_bytes:
+        return 0.0
+    x = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    return float(np.sqrt(np.mean(x * x) + 1e-12))
+
+def silence_frame() -> bytes:
+    return b"\x00" * BYTES_PER_CHUNK
+
+def play_wav_bytes(wav_bytes: bytes):
+    # pw-play necesita archivo
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        f.write(wav_bytes)
+        fname = f.name
+    try:
+        subprocess.run(["pw-play", "--target", OUTPUT_SINK_TARGET, fname], check=True)
+    finally:
+        with contextlib.suppress(Exception):
+            os.unlink(fname)
+
+class TTSClient:
+    """requests.Session para reusar conexión y bajar latencia."""
+    def __init__(self, url: str):
+        self.url = url
+        self.s = requests.Session()
+
+    def tts(self, text: str) -> bytes:
+        r = self.s.post(self.url, json={"text": text}, timeout=120)
+        r.raise_for_status()
+        return r.content
+
+# =========================
+# VAD state
+# =========================
+
+@dataclass
+class VadState:
+    in_utt: bool = False
+    utt_start: float = 0.0
+    last_voice: float = 0.0
+    last_end: float = 0.0
+
+    def can_start(self, now: float) -> bool:
+        return (now - self.last_end) >= COOLDOWN_SECONDS
+
+    def start(self, now: float):
+        self.in_utt = True
+        self.utt_start = now
+        self.last_voice = now
+
+    def mark_voice(self, now: float):
+        self.last_voice = now
+
+    def should_end(self, now: float) -> bool:
+        return self.in_utt and (now - self.last_voice) >= SILENCE_MAX_SECONDS
+
+    def end(self, now: float):
+        self.in_utt = False
+        self.last_end = now
+
+# =========================
+# PipeWire capture (asyncio subprocess, SIN executor)
+# =========================
+
+async def spawn_pw_record():
+    # IMPORTANT: si stderr queda en PIPE y nadie lo lee, puede bloquear.
+    # Solución: lo drenamos en una task aparte.
+    proc = await asyncio.create_subprocess_exec(
+        "pw-record",
+        "--target", INPUT_PW_TARGET,
+        "--rate", str(SAMPLE_RATE),
+        "--channels", "1",
+        "--format", "s16",
+        "-",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    return proc
+
+async def drain_stderr(proc: asyncio.subprocess.Process, stop_evt: asyncio.Event):
+    """Drena stderr para evitar deadlocks y deja algo útil si explota."""
+    assert proc.stderr is not None
+    try:
+        while not stop_evt.is_set():
+            line = await proc.stderr.readline()
+            if not line:
+                break
+            # Comentá si te molesta el ruido:
+            # print("pw-record:", line.decode("utf-8", "ignore").rstrip())
+    except Exception:
+        pass
+
+async def pw_reader(q: asyncio.Queue[bytes], stop_evt: asyncio.Event):
+    proc = await spawn_pw_record()
+    stderr_task = asyncio.create_task(drain_stderr(proc, stop_evt))
+
+    print(f"🎧 Capturando {INPUT_PW_TARGET} con pw-record… ({CHUNK_MS}ms chunks)")
+
+    try:
+        assert proc.stdout is not None
+        while not stop_evt.is_set():
+            data = await proc.stdout.readexactly(BYTES_PER_CHUNK)
+            if not data:
+                raise RuntimeError("pw-record terminó sin datos.")
+
+            # Backpressure: drop-oldest si está llena
+            if q.full():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    q.get_nowait()
+            await q.put(data)
+    except asyncio.IncompleteReadError as e:
+        # pw-record se cortó (target inválido, PipeWire restart, etc.)
+        raise RuntimeError(f"pw-record se cortó (incomplete read). got={len(e.partial)} bytes") from e
+    finally:
+        stop_evt.set()
+        with contextlib.suppress(Exception):
+            proc.terminate()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        stderr_task.cancel()
+        await asyncio.gather(stderr_task, return_exceptions=True)
+
+# =========================
+# Session (WS + sender/receiver)
+# =========================
+
+async def run_session():
+    q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=QUEUE_MAX)
+    stop_evt = asyncio.Event()
+
+    # Evita TTS simultáneo
+    tts_lock = asyncio.Lock()
+    last_spoken_t = 0.0
+    tts_client = TTSClient(TTS_URL)
+
+    # Esto evita que un task se muera silenciosamente y el otro quede colgado.
+    def request_stop():
+        if not stop_evt.is_set():
+            stop_evt.set()
+
+    async with websockets.connect(
+        STT_WS,
+        max_size=10_000_000,
+        ping_interval=PING_INTERVAL,
+        ping_timeout=PING_TIMEOUT,
+        close_timeout=2.0,
+        max_queue=32,
+        write_limit=2**16,
+    ) as ws:
+        # Handshake "ready"
+        try:
+            ready = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            print("SERVER:", ready)
+        except Exception:
+            print("SERVER: (no ready message / timeout)")
+
+        vad = VadState()
+        sil = silence_frame()
+
+        async def sender():
+            """Lee audio chunks, hace VAD y manda bytes al server."""
+            try:
+                while not stop_evt.is_set():
+                    try:
+                        chunk = await asyncio.wait_for(q.get(), timeout=Q_GET_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        continue
+
+                    now = time.monotonic()
+                    r = pcm16le_rms(chunk)
+
+                    # Si no estoy en utterance, solo arranco con voz + cooldown
+                    if not vad.in_utt:
+                        if r >= SILENCE_RMS_THRESHOLD and vad.can_start(now):
+                            vad.start(now)
+                        else:
+                            continue  # no mandamos silencio fuera de utterance
+
+                    # Si hay voz, actualizo timestamp
+                    if r >= SILENCE_RMS_THRESHOLD:
+                        vad.mark_voice(now)
+
+                    # Enviar chunk
+                    await ws.send(chunk)
+
+                    # ¿terminó por silencio?
+                    if vad.should_end(now):
+                        dur = now - vad.utt_start
+
+                        # Tail de silencio para “cerrar”
+                        for _ in range(SILENCE_TAIL_FRAMES):
+                            await ws.send(sil)
+
+                        vad.end(time.monotonic())
+
+                        # Si fue demasiado corto, lo dejamos pasar; el cooldown igual protege.
+                        if dur < MIN_UTTERANCE_SECONDS:
+                            pass
+
+            except (ConnectionClosed, ConnectionClosedError):
+                # Si el WS muere, no tires traceback: cortá limpio y que reconecte el loop.
+                request_stop()
+                raise
+            except Exception:
+                request_stop()
+                raise
+
+        async def receiver():
+            """Recibe transcripts y hace TTS."""
+            nonlocal last_spoken_t
+            try:
+                while not stop_evt.is_set():
+                    raw = await ws.recv()  # server manda JSON string
+
+                    # Si el server alguna vez manda bytes, ignoramos
+                    if isinstance(raw, (bytes, bytearray)):
+                        continue
+
+                    msg = json.loads(raw)
+                    t = msg.get("type")
+
+                    if t == "transcript":
+                        text = (msg.get("text") or "").strip()
+                        if not text:
+                            continue
+
+                        print("GAME SAID:", text)
+
+                        # Cooldown de respuesta
+                        now = time.monotonic()
+                        if (now - last_spoken_t) < RESPONSE_COOLDOWN_SECONDS:
+                            continue
+
+                        async with tts_lock:
+                            # Recheck por si entraron varios transcripts mientras esperaba lock
+                            now2 = time.monotonic()
+                            if (now2 - last_spoken_t) < RESPONSE_COOLDOWN_SECONDS:
+                                continue
+
+                            # TTS + play en threads (requests + pw-play bloquean)
+                            wav = await asyncio.to_thread(tts_client.tts, f"You said: {text}")
+                            await asyncio.to_thread(play_wav_bytes, wav)
+                            last_spoken_t = time.monotonic()
+
+                    elif t == "error":
+                        raise RuntimeError(msg.get("detail") or "server error")
+
+                    else:
+                        # otros mensajes (ready/partial/etc)
+                        pass
+
+            except (ConnectionClosed, ConnectionClosedError):
+                request_stop()
+                raise
+            except Exception:
+                request_stop()
+                raise
+
+        tasks = [
+            asyncio.create_task(pw_reader(q, stop_evt), name="pw_reader"),
+            asyncio.create_task(sender(), name="sender"),
+            asyncio.create_task(receiver(), name="receiver"),
+        ]
+
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+
+        # Propagar excepción real si la hubo (esto es CLAVE: ya no queda “Task exception was never retrieved”)
+        exc_to_raise = None
+        for t in done:
+            exc = t.exception()
+            if exc:
+                exc_to_raise = exc
+                break
+
+        stop_evt.set()
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        if exc_to_raise:
+            raise exc_to_raise
+
+
+
+async def main() -> None:
+    """Main entry point."""
+    client = TalkbackClient()
+    
+    try:
+        await client.run_with_reconnect()
+    except KeyboardInterrupt:
+        logger.info("\n👋 Shutting down...")
+    finally:
+        client.cleanup()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        sys.exit(0)
