@@ -1,0 +1,51 @@
+# Talkback Bot Configuration
+
+# Server endpoints
+server:
+  pc_ip: "192.168.1.150"
+  stt_port: 8010
+  tts_port: 8000
+
+# Audio settings
+audio:
+  sample_rate: 16000
+  chunk_ms: 20  # 20ms recommended for low latency
+  input_device: "CABLE Output"  
+  output_device: "VoiceMeeter Out B1"   
+
+# Voice Activity Detection (VAD)
+vad:
+  silence_rms_threshold: 0.008
+  silence_max_seconds: 0.7
+  min_utterance_seconds: 0.35
+  utterance_cooldown: 1.2
+  silence_tail_frames: 6
+
+# Queue and timing
+queue:
+  max_size: 200
+  get_timeout: 1.0
+
+# Response behavior
+response:
+  cooldown_seconds: 0.8  # Delay between bot responses
+
+# WebSocket settings
+websocket:
+  ping_interval: 20.0
+  ping_timeout: 20.0
+  reconnect_delay: 1.0
+  max_size: 10000000
+  max_queue: 32
+  write_limit: 65536
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+  date_format: "%H:%M:%S"
+  
+# Metrics
+metrics:
+  enabled: true
+  log_interval: 30.0  # Log metrics every N seconds
